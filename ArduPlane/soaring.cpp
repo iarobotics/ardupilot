@@ -5,6 +5,8 @@
 *
 *  Peter Braswell, Samuel Tabor, Andrey Kolobov, and Iain Guilliard
 */
+
+//Relevant for control?
 void Plane::update_soaring() {
     
     if (!g2.soaring_controller.is_active()) {

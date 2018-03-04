@@ -16,15 +16,14 @@
  */
 void Plane::failsafe_check(void)
 {
-    static uint16_t last_ticks;
+    static uint16_t last_mainLoop_count;
     static uint32_t last_timestamp;
     static bool in_failsafe;
     uint32_t tnow = micros();
 
-    const uint16_t ticks = scheduler.ticks();
-    if (ticks != last_ticks) {
+    if (perf.mainLoop_count != last_mainLoop_count) {
         // the main loop is running, all is OK
-        last_ticks = ticks;
+        last_mainLoop_count = perf.mainLoop_count;
         last_timestamp = tnow;
         in_failsafe = false;
         return;

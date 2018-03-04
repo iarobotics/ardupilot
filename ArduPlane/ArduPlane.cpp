@@ -22,6 +22,41 @@
 
 #include "Plane.h"
 
+int turn_direction = 1;
+float distance_from_wp = 0;
+const float plane_speed = 16.0f;
+const float gr_acc = 9.81f;
+//float rc = rg/2*sinf(bearing_angle);
+
+float turn_radius = 0;
+float bank_angle_rad = 0;
+float bank_angle_deg = 0;
+
+//float turn_radius = 50.0f;
+//float bank_angle_rad = atanf((sq(plane_speed) / turn_radius * gr_acc) / 100);
+//float bank_angle_deg = degrees(bank_angle_rad) * 100;
+
+float arc_length = 0;
+//time required to clear the arch length in ms
+uint32_t arc_clear_time = 0;
+
+bool wp_done = false;
+bool at_wp_4 = false;
+bool at_wp_6 = false;
+bool at_wp_8 = false;
+
+bool is_on_wp_4 = false;
+bool is_on_wp_6 = false;
+bool is_on_wp_8 = false;
+
+uint8_t wp_count = 0;
+
+uint32_t wp4_time_start_bank = 0;
+uint32_t wp6_time_start_bank = 0;
+uint32_t wp8_time_start_bank = 0;
+
+int32_t desired_yaw = 0;
+
 #define SCHED_TASK(func, rate_hz, max_time_micros) SCHED_TASK_CLASS(Plane, &plane, func, rate_hz, max_time_micros)
 
 
@@ -70,7 +105,7 @@ const AP_Scheduler::Task Plane::scheduler_tasks[] = {
     SCHED_TASK(airspeed_ratio_update,   1,    100),
     SCHED_TASK(update_mount,           50,    100),
     SCHED_TASK(update_trigger,         50,    100),
-    SCHED_TASK_CLASS(AP_Scheduler, &plane.scheduler, update_logging,         0.2,    100),
+    SCHED_TASK(log_perf_info,         0.2,    100),
     SCHED_TASK(compass_save,          0.1,    200),
     SCHED_TASK(Log_Write_Fast,         25,    300),
     SCHED_TASK(update_logging1,        25,    300),
@@ -83,15 +118,9 @@ const AP_Scheduler::Task Plane::scheduler_tasks[] = {
     SCHED_TASK(ins_periodic,           50,     50),
     SCHED_TASK(avoidance_adsb_update,  10,    100),
     SCHED_TASK(button_update,           5,    100),
-#if STATS_ENABLED == ENABLED
     SCHED_TASK(stats_update,            1,    100),
-#endif
-#if GRIPPER_ENABLED == ENABLED
-    SCHED_TASK_CLASS(AP_Gripper, &plane.g2.gripper, update, 10, 75),
-#endif
 };
 
-#if STATS_ENABLED == ENABLED
 /*
   update AP_Stats
  */
@@ -99,7 +128,7 @@ void Plane::stats_update(void)
 {
     g2.stats.update();
 }
-#endif
+
 
 void Plane::setup() 
 {
@@ -113,13 +142,45 @@ void Plane::setup()
     init_ardupilot();
 
     // initialise the main loop scheduler
-    scheduler.init(&scheduler_tasks[0], ARRAY_SIZE(scheduler_tasks), MASK_LOG_PM);
+    scheduler.init(&scheduler_tasks[0], ARRAY_SIZE(scheduler_tasks));
 }
 
 void Plane::loop()
 {
-    scheduler.loop();
-    G_Dt = scheduler.get_loop_period_s();
+    uint32_t loop_us = 1000000UL / scheduler.get_loop_rate_hz();
+
+    // wait for an INS sample
+    ins.wait_for_sample();
+
+    uint32_t timer = micros();
+
+    perf.delta_us_fast_loop  = timer - perf.fast_loopTimer_us;
+    G_Dt = perf.delta_us_fast_loop * 1.0e-6f;
+
+    if (perf.delta_us_fast_loop > loop_us + 500) {
+        perf.num_long++;
+    }
+
+    if (perf.delta_us_fast_loop > perf.G_Dt_max && perf.fast_loopTimer_us != 0) {
+        perf.G_Dt_max = perf.delta_us_fast_loop;
+    }
+
+    if (perf.delta_us_fast_loop < perf.G_Dt_min || perf.G_Dt_min == 0) {
+        perf.G_Dt_min = perf.delta_us_fast_loop;
+    }
+    perf.fast_loopTimer_us = timer;
+
+    perf.mainLoop_count++;
+
+    // tell the scheduler one tick has passed
+    scheduler.tick();
+
+    // run all the tasks that are due to run. Note that we only
+    // have to call this once per loop, as the tasks are scheduled
+    // in multiples of the main loop tick. So if they don't run on
+    // the first call to the scheduler they won't run on a later
+    // call until scheduler.tick() is called again
+    scheduler.run(loop_us);
 }
 
 void Plane::update_soft_armed()
@@ -207,6 +268,7 @@ void Plane::update_compass(void)
 {
     if (g.compass_enabled && compass.read()) {
         ahrs.set_compass(&compass);
+        compass.learn_offsets();
         if (should_log(MASK_LOG_COMPASS) && !ahrs.have_ekf_logging()) {
             DataFlash.Log_Write_Compass(compass);
         }
@@ -337,6 +399,24 @@ void Plane::one_second_loop()
     // indicates that the sensor or subsystem is present but not
     // functioning correctly
     update_sensor_status_flags();
+}
+
+void Plane::log_perf_info()
+{
+    if (scheduler.debug() != 0) {
+        gcs().send_text(MAV_SEVERITY_INFO, "PERF: %u/%u Dt=%u/%u Log=%u",
+                          (unsigned)perf.num_long,
+                          (unsigned)perf.mainLoop_count,
+                          (unsigned)perf.G_Dt_max,
+                          (unsigned)perf.G_Dt_min,
+                          (unsigned)(DataFlash.num_dropped() - perf.last_log_dropped));
+    }
+
+    if (should_log(MASK_LOG_PM)) {
+        Log_Write_Performance();
+    }
+
+    resetPerfData();
 }
 
 void Plane::compass_save()
@@ -528,6 +608,55 @@ void Plane::handle_auto_mode(void)
 }
 
 /*
+  main handling for CUSTOM mode
+ */
+void Plane::handle_custom_mode(uint32_t &bank_duration, uint8_t &wp_counter)
+//todo
+{    
+
+    if (millis() - bank_duration < arc_clear_time)
+    {
+        nav_roll_cd =  bank_angle_deg * turn_direction;
+
+        switch (wp_counter)
+        {
+            case 4:
+                is_on_wp_4 = true;
+                break;
+            case 6:
+                is_on_wp_6 = true;
+                break;
+            case 8:
+                is_on_wp_8 = true;
+                break;
+        }
+    }
+    else
+    {
+        switch (wp_counter)
+        {
+            case 4:
+                is_on_wp_4 = false;
+                break;
+            case 6:
+                is_on_wp_6 = false;
+                break;
+            case 8:
+                is_on_wp_8 = false;
+                set_mode(QRTL, MODE_REASON_UNKNOWN);
+                break;
+                
+        }
+    }
+
+    update_fbwb_speed_height();
+    //update_load_factor();
+    //nav_roll_cd = degrees(atanf((16.0f * 16.0f / rc * 9.81f)/100))*100 * turn_direction;
+    //ahrs.yaw
+}
+
+
+/*
   main flight mode dependent update code 
  */
 void Plane::update_flight_mode(void)
@@ -557,7 +686,94 @@ void Plane::update_flight_mode(void)
     switch (effective_mode) 
     {
     case AUTO:
+    //TODO
+        
         handle_auto_mode();
+
+        //Waypoint 4 and 5  -point 43.82
+        if (((fabs(auto_state.wp_distance) <= 60.0f) && (millis() - last_mode_change_ms > 24000)  && (millis() - last_mode_change_ms < 40000)) || (is_on_wp_4 == true))
+        {
+            //gcs().send_text(MAV_SEVERITY_DEBUG, "TO_WP_4_5");
+
+            wp_count = 4;
+
+            turn_radius = 40.5f;
+            bank_angle_rad = atanf(((plane_speed * plane_speed) / turn_radius * gr_acc) / 100);
+            bank_angle_deg = degrees(bank_angle_rad) * 100;
+
+
+            turn_direction = 1;
+            arc_length = 128.56f;
+            arc_clear_time = (arc_length / plane_speed) *1000;
+
+            if (at_wp_4 == false)
+            {
+                wp4_time_start_bank = millis();
+                at_wp_4 = true;
+                //ahrs.yaw_sensor
+            }
+
+            handle_custom_mode(wp4_time_start_bank, wp_count);
+            break;
+        }
+
+        //Waypoint 6 and 7 - point 31.76 ----47
+        if (((fabs(auto_state.wp_distance) <= 50.0f) && (millis() - last_mode_change_ms > 40000) && (millis() - last_mode_change_ms < 55000)) || (is_on_wp_6 == true))
+        {
+            //gcs().send_text(MAV_SEVERITY_DEBUG, "TO_WP_6_7");
+
+            wp_count = 6;
+            
+            turn_radius = 42.5f;
+            bank_angle_rad = atanf(((plane_speed * plane_speed) / turn_radius * gr_acc) / 100);
+            bank_angle_deg = degrees(bank_angle_rad) * 100;
+
+
+            turn_direction = -1;
+            arc_length = 134.52f;
+            arc_clear_time = (arc_length / plane_speed) *1000;
+
+            if (at_wp_6 == false)
+            {
+                wp6_time_start_bank = millis();
+                at_wp_6 = true;
+            }
+
+            handle_custom_mode(wp6_time_start_bank, wp_count);
+            break;
+        }
+
+        //Waypoint 8 and 9 - point 92.0f-------108
+        if (((fabs(auto_state.wp_distance) <= 108.0f) && (millis() - last_mode_change_ms > 55000)) || (is_on_wp_8 == true))
+        {
+            //gcs().send_text(MAV_SEVERITY_DEBUG, "TO_WP_8_9");
+
+            wp_count = 8;
+            
+            turn_radius = 50.0f;
+            bank_angle_rad = atanf(((plane_speed * plane_speed) / turn_radius * gr_acc) / 100);
+            bank_angle_deg = degrees(bank_angle_rad) * 100;
+
+
+            turn_direction = 1;
+            arc_length = 160.77;
+            //arc_length = 105.83f;
+            arc_clear_time = (arc_length / plane_speed) *1000;
+            
+            if (at_wp_8 == false)
+            {
+                wp8_time_start_bank = millis();
+                at_wp_8 = true;
+            }
+
+            handle_custom_mode(wp8_time_start_bank, wp_count);
+            break;
+        }
+        break;
+
+
+    case MINE:
+        //handle_custom_mode();
         break;
 
     case AVOID_ADSB:
@@ -673,7 +889,7 @@ void Plane::update_flight_mode(void)
           any aileron or rudder input
         */
         if (channel_roll->get_control_in() != 0 || channel_rudder->get_control_in() != 0) {
-            cruise_state.locked_heading = false;
+                    cruise_state.locked_heading = false;
             cruise_state.lock_timer_ms = 0;
         }                 
         
@@ -756,6 +972,7 @@ void Plane::update_navigation()
     
     switch(control_mode) {
     case AUTO:
+    case MINE:
         if (home_is_set != HOME_UNSET) {
             mission.update();
         }
@@ -771,7 +988,7 @@ void Plane::update_navigation()
               for a quadplane in RTL mode we switch to QRTL when we
               are within the maximum of the stopping distance and the
               RTL_RADIUS
-             */
+             */            
             set_mode(QRTL, MODE_REASON_UNKNOWN);
             break;
         } else if (g.rtl_autoland == 1 &&

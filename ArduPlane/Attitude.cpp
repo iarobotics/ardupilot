@@ -569,6 +569,20 @@ void Plane::calc_nav_roll()
     update_load_factor();
 }
 
+void Plane::calc_nav_roll_custom()
+{
+    int32_t commanded_roll = nav_controller->nav_roll_cd_custom();
+
+    // Received an external msg that guides roll in the last 3 seconds?
+    if ((control_mode == GUIDED || control_mode == AVOID_ADSB) &&
+            plane.guided_state.last_forced_rpy_ms.x > 0 &&
+            millis() - plane.guided_state.last_forced_rpy_ms.x < 3000) {
+        commanded_roll = plane.guided_state.forced_rpy_cd.x;
+    }
+
+    nav_roll_cd = constrain_int32(commanded_roll, -roll_limit_cd, roll_limit_cd);
+    update_load_factor();
+}
 
 bool Plane::allow_reverse_thrust(void)
 {

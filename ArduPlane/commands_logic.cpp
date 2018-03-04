@@ -227,23 +227,6 @@ bool Plane::start_command(const AP_Mission::Mission_Command& cmd)
                                             cmd.content.do_engine_control.cold_start,
                                             cmd.content.do_engine_control.height_delay_cm*0.01f);
         break;
-#if GRIPPER_ENABLED == ENABLED
-    case MAV_CMD_DO_GRIPPER:                            // Mission command to control gripper
-        switch (cmd.content.gripper.action) {
-            case GRIPPER_ACTION_RELEASE:
-                plane.g2.gripper.release();
-                gcs().send_text(MAV_SEVERITY_INFO, "Gripper Released");
-                break;
-            case GRIPPER_ACTION_GRAB:
-                plane.g2.gripper.grab();
-                gcs().send_text(MAV_SEVERITY_INFO, "Gripper Grabbed");
-                break;
-            default:
-                // do nothing
-                break;
-        }
-        break;
-#endif
     }
 
     return true;
@@ -345,7 +328,6 @@ bool Plane::verify_command(const AP_Mission::Mission_Command& cmd)        // Ret
     case MAV_CMD_DO_MOUNT_CONTROL:
     case MAV_CMD_DO_VTOL_TRANSITION:
     case MAV_CMD_DO_ENGINE_CONTROL:
-    case MAV_CMD_DO_GRIPPER:
         return true;
 
     default:
@@ -507,10 +489,10 @@ void Plane::do_continue_and_change_alt(const AP_Mission::Mission_Command& cmd)
     if (!locations_are_same(prev_WP_loc, next_WP_loc)) {
         // use waypoint based bearing, this is the usual case
         steer_state.hold_course_cd = -1;
-    } else if (AP::gps().status() >= AP_GPS::GPS_OK_FIX_2D) {
+    } else if (ahrs.get_gps().status() >= AP_GPS::GPS_OK_FIX_2D) {
         // use gps ground course based bearing hold
         steer_state.hold_course_cd = -1;
-        bearing = AP::gps().ground_course_cd() * 0.01f;
+        bearing = ahrs.get_gps().ground_course_cd() * 0.01f;
         location_update(next_WP_loc, bearing, 1000); // push it out 1km
     } else {
         // use yaw based bearing hold

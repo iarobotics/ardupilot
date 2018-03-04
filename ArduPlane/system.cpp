@@ -33,10 +33,8 @@ void Plane::init_ardupilot()
     //
     load_parameters();
 
-#if STATS_ENABLED == ENABLED
     // initialise stats module
     g2.stats.init();
-#endif
 
 #if HIL_SUPPORT
     if (g.hil_mode == 1) {
@@ -203,11 +201,6 @@ void Plane::init_ardupilot()
     }
 #endif
 
-// init cargo gripper
-#if GRIPPER_ENABLED == ENABLED
-    g2.gripper.init();
-#endif
-
     // disable safety if requested
     BoardConfig.init_safety();
 }
@@ -334,7 +327,6 @@ void Plane::set_mode(enum FlightMode mode, mode_reason_t reason)
     switch(control_mode)
     {
     case INITIALISING:
-        throttle_allows_nudging = true;
         auto_throttle_mode = true;
         auto_navigation_mode = false;
         break;
@@ -343,20 +335,17 @@ void Plane::set_mode(enum FlightMode mode, mode_reason_t reason)
     case STABILIZE:
     case TRAINING:
     case FLY_BY_WIRE_A:
-        throttle_allows_nudging = false;
         auto_throttle_mode = false;
         auto_navigation_mode = false;
         break;
 
     case AUTOTUNE:
-        throttle_allows_nudging = false;
         auto_throttle_mode = false;
         auto_navigation_mode = false;
         autotune_start();
         break;
 
     case ACRO:
-        throttle_allows_nudging = false;
         auto_throttle_mode = false;
         auto_navigation_mode = false;
         acro_state.locked_roll = false;
@@ -364,7 +353,6 @@ void Plane::set_mode(enum FlightMode mode, mode_reason_t reason)
         break;
         
     case CRUISE:
-        throttle_allows_nudging = false;
         auto_throttle_mode = true;
         auto_navigation_mode = false;
         cruise_state.locked_heading = false;
@@ -377,7 +365,7 @@ void Plane::set_mode(enum FlightMode mode, mode_reason_t reason)
         break;
 
     case FLY_BY_WIRE_B:
-        throttle_allows_nudging = false;
+    case MINE:
         auto_throttle_mode = true;
         auto_navigation_mode = false;
         
@@ -389,14 +377,12 @@ void Plane::set_mode(enum FlightMode mode, mode_reason_t reason)
 
     case CIRCLE:
         // the altitude to circle at is taken from the current altitude
-        throttle_allows_nudging = false;
         auto_throttle_mode = true;
         auto_navigation_mode = true;
         next_WP_loc.alt = current_loc.alt;
         break;
 
     case AUTO:
-        throttle_allows_nudging = true;
         auto_throttle_mode = true;
         auto_navigation_mode = true;
         if (quadplane.available() && quadplane.enable == 2) {
@@ -412,7 +398,6 @@ void Plane::set_mode(enum FlightMode mode, mode_reason_t reason)
         break;
 
     case RTL:
-        throttle_allows_nudging = true;
         auto_throttle_mode = true;
         auto_navigation_mode = true;
         prev_WP_loc = current_loc;
@@ -420,7 +405,6 @@ void Plane::set_mode(enum FlightMode mode, mode_reason_t reason)
         break;
 
     case LOITER:
-        throttle_allows_nudging = true;
         auto_throttle_mode = true;
         auto_navigation_mode = true;
         do_loiter_at_location();
@@ -435,7 +419,6 @@ void Plane::set_mode(enum FlightMode mode, mode_reason_t reason)
 
     case AVOID_ADSB:
     case GUIDED:
-        throttle_allows_nudging = true;
         auto_throttle_mode = true;
         auto_navigation_mode = true;
         guided_throttle_passthru = false;
@@ -452,7 +435,6 @@ void Plane::set_mode(enum FlightMode mode, mode_reason_t reason)
     case QLOITER:
     case QLAND:
     case QRTL:
-        throttle_allows_nudging = true;
         auto_navigation_mode = false;
         if (!quadplane.init_mode()) {
             control_mode = previous_mode;
@@ -606,6 +588,17 @@ void Plane::update_notify()
     notify.update();
 }
 
+void Plane::resetPerfData(void) 
+{
+    perf.mainLoop_count = 0;
+    perf.G_Dt_max       = 0;
+    perf.G_Dt_min       = 0;
+    perf.num_long       = 0;
+    perf.start_ms       = millis();
+    perf.last_log_dropped = DataFlash.num_dropped();
+}
+
+
 // sets notify object flight mode information
 void Plane::notify_flight_mode(enum FlightMode mode)
 {
@@ -672,6 +665,9 @@ void Plane::notify_flight_mode(enum FlightMode mode)
         break;
     case QRTL:
         notify.set_flight_mode_str("QRTL");
+        break;
+    case MINE:
+        notify.set_flight_mode_str("MINE");
         break;
     default:
         notify.set_flight_mode_str("----");
